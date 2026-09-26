@@ -1,7 +1,9 @@
 from fastapi import FastAPI
 from app.core.database import engine
+from app.api.student import router as student_router
 
 app = FastAPI(title="TribalSetu API")
+app.include_router(student_router, prefix="/api/v1")
 
 
 @app.get("/")
