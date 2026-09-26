@@ -1,27 +1,27 @@
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.student import Student
 from app.schemas.student import StudentCreate
+from app.repositories.student_repository import (
+    create_student,
+    get_students,
+    get_student_by_email
+)
 
 
-def create_student(db: Session, student: StudentCreate):
+def add_student(db: Session, student: StudentCreate):
+    existing_student = get_student_by_email(db, student.email)
+
+    if existing_student:
+        return None
+
     new_student = Student(
         name=student.name,
         email=student.email
     )
 
-    db.add(new_student)
-
-    try:
-        db.commit()
-        db.refresh(new_student)
-    except IntegrityError:
-        db.rollback()
-        return None
-
-    return new_student
+    return create_student(db, new_student)
 
 
-def get_students(db: Session):
-    return db.query(Student).all()
+def list_students(db: Session):
+    return get_students(db)
