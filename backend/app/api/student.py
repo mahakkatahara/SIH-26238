@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.core.dependencies import get_db
@@ -12,9 +12,23 @@ router = APIRouter(prefix="/students", tags=["Students"])
 def add_student_api(student: StudentCreate, db: Session = Depends(get_db)):
     result = add_student(db, student)
 
-    if result is None:
-        from fastapi import HTTPException
-        raise HTTPException(status_code=409, detail="Email already exists")
+    if result == "USER_NOT_FOUND":
+        raise HTTPException(
+            status_code=404,
+            detail="User not found"
+        )
+
+    if result == "STUDENT_ALREADY_EXISTS":
+        raise HTTPException(
+            status_code=409,
+            detail="Student profile already exists for this user"
+        )
+
+    if result == "EMAIL_ALREADY_EXISTS":
+        raise HTTPException(
+            status_code=409,
+            detail="Email already registered for another student"
+        )
 
     return result
 
