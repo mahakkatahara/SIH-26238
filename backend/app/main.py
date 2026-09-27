@@ -6,6 +6,7 @@ from app.api.scholarship import router as scholarship_router
 from app.api.application import router as application_router
 from app.api.document import router as document_router
 from app.api.eligibility import router as eligibility_router
+from app.api.verification import router as verification_router
 
 app = FastAPI(title="TribalSetu API")
 app.include_router(student_router, prefix="/api/v1")
@@ -14,6 +15,7 @@ app.include_router(scholarship_router, prefix="/api/v1")
 app.include_router(application_router, prefix="/api/v1")
 app.include_router(document_router, prefix="/api/v1")
 app.include_router(eligibility_router, prefix="/api/v1")
+app.include_router(verification_router, prefix="/api/v1")
 
 @app.get("/")
 def root():

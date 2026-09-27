@@ -25,6 +25,7 @@ from app.models.document import Document
 from app.models.scholarship import Scholarship
 from app.models.student import Student
 from app.models.user import User
+from app.models.verification_record import VerificationRecord
 
 target_metadata = Base.metadata
 
