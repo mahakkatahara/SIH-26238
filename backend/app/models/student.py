@@ -1,4 +1,5 @@
-from sqlalchemy import Column, String
+from sqlalchemy import Column, String, ForeignKey
+from sqlalchemy.orm import relationship
 from app.core.database import Base
 import uuid
 
@@ -9,3 +10,6 @@ class Student(Base):
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     name = Column(String, nullable=False)
     email = Column(String, unique=True, nullable=False)
+    user_id = Column(String, ForeignKey("users.id"), unique=True, nullable=True)
+
+    user = relationship("User", back_populates="student")
