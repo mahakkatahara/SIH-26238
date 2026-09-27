@@ -8,7 +8,8 @@ from app.services.student_service import add_student, list_students
 router = APIRouter(prefix="/students", tags=["Students"])
 
 
-@router.post("/", response_model=StudentResponse)
+@router.post("", response_model=StudentResponse)
+@router.post("/", response_model=StudentResponse, include_in_schema=False)
 def add_student_api(student: StudentCreate, db: Session = Depends(get_db)):
     result = add_student(db, student)
 
@@ -33,6 +34,7 @@ def add_student_api(student: StudentCreate, db: Session = Depends(get_db)):
     return result
 
 
-@router.get("/", response_model=list[StudentResponse])
+@router.get("", response_model=list[StudentResponse])
+@router.get("/", response_model=list[StudentResponse], include_in_schema=False)
 def list_students_api(db: Session = Depends(get_db)):
     return list_students(db)

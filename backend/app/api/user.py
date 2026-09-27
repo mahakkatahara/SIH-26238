@@ -8,7 +8,8 @@ from app.services.user_service import register_user, login_user
 router = APIRouter(prefix="/users", tags=["Users"])
 
 
-@router.post("/", response_model=UserResponse)
+@router.post("", response_model=UserResponse)
+@router.post("/", response_model=UserResponse, include_in_schema=False)
 def register_user_api(
     user: UserCreate,
     db: Session = Depends(get_db)
@@ -25,6 +26,7 @@ def register_user_api(
 
 
 @router.post("/login", response_model=UserResponse)
+@router.post("/login/", response_model=UserResponse, include_in_schema=False)
 def login_user_api(
     user: UserLogin,
     db: Session = Depends(get_db)
