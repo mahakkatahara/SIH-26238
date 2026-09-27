@@ -6,7 +6,10 @@ from app.repositories.verification_repository import (
     get_verification_record,
     create_verification_record as repo_create_verification_record,
     get_verifications_by_application_id,
+    get_verification_by_id,
+    update_verification_status,
 )
+from app.integrations.verification.mock_adapter import MockVerificationAdapter
 
 
 def create_verification_record(db: Session, application_id: str, document_id: str):
@@ -42,3 +45,35 @@ def get_application_verifications(db: Session, application_id: str):
 
     # 2. Retrieve records
     return get_verifications_by_application_id(db, application_id)
+
+
+def execute_verification(db: Session, verification_id: str):
+    # 1. Find verification record
+    verification = get_verification_by_id(db, verification_id)
+    if not verification:
+        return "VERIFICATION_NOT_FOUND"
+
+    # 2. Verify status is PENDING
+    if verification.status != "PENDING":
+        return "NOT_PENDING"
+
+    # 3. Load associated document
+    document = get_document_by_id(db, verification.document_id)
+    if not document:
+        return "DOCUMENT_NOT_FOUND"
+
+    # 4. Invoke mock adapter
+    mock_result = MockVerificationAdapter.verify_document(document)
+
+    # 5. Persist only status update
+    update_verification_status(db, verification, mock_result["status"])
+
+    # 6. Return execution response payload
+    return {
+        "id": verification.id,
+        "application_id": verification.application_id,
+        "document_id": verification.document_id,
+        "status": verification.status,
+        "message": mock_result["message"],
+        "evaluation_mode": mock_result["evaluation_mode"],
+    }

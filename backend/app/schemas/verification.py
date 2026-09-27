@@ -13,3 +13,13 @@ class VerificationRecordResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class VerificationExecutionResponse(BaseModel):
+    id: str
+    application_id: str
+    document_id: str
+    status: str
+    message: str
+    evaluation_mode: str
+

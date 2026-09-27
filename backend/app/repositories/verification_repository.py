@@ -31,3 +31,18 @@ def get_verifications_by_application_id(db: Session, application_id: str):
         .filter(VerificationRecord.application_id == application_id)
         .all()
     )
+
+
+def get_verification_by_id(db: Session, verification_id: str):
+    return (
+        db.query(VerificationRecord)
+        .filter(VerificationRecord.id == verification_id)
+        .first()
+    )
+
+
+def update_verification_status(db: Session, verification: VerificationRecord, status: str):
+    verification.status = status
+    db.commit()
+    db.refresh(verification)
+    return verification

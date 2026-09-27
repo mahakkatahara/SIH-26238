@@ -114,3 +114,87 @@ CREATE TABLE verification_records (
 ]
 ```
 - Direct JSON array: `list[VerificationRecordResponse]`.
+
+---
+
+## 3. Team-Approved Phase-2 Contract — Mock Verification Execution
+
+### Playbook Alignment & Boundaries
+- The Playbook defines the conceptual adapter method **`verifyDocument()`** (Section 14).
+- The Playbook permits and recommends **mock adapters for SIH** ("For SIH, use mock adapters that behave like the real systems").
+- Production government endpoint details must come from authorized documentation and credentials; real government APIs are **not** invented.
+- This implementation is **strictly a mock integration** for demonstration purposes and is **NOT** a live DigiLocker or official government verification service.
+
+---
+
+### Adapter Boundary: `MockVerificationAdapter`
+
+- Located under `backend/app/integrations/verification/mock_adapter.py`.
+- Exposes `verify_document(document: Document) -> dict`.
+- Returns an internal execution outcome dictionary:
+  ```python
+  {
+      "status": "VERIFIED" | "MISMATCH" | "FAILED",
+      "message": "<mock explanation>",
+      "evaluation_mode": "MOCK"
+  }
+  ```
+- **Evaluation Mode:** `evaluation_mode` is always `"MOCK"`.
+- **Stateless Metadata:** `message` and `evaluation_mode` are returned in the execution response only and are **not** persisted to PostgreSQL. The database table `verification_records` remains strictly: `id`, `application_id`, `document_id`, `status`.
+
+---
+
+### Deterministic Mock Behavior
+
+The mock adapter executes purely deterministic demo rules without random generation, external network requests, or fake government heuristics. It inspects only explicit test markers on `document.document_type`:
+
+| Marker / `document_type` | Resulting `status` | Message / Description |
+| :--- | :--- | :--- |
+| `TEST_VERIFIED` | `VERIFIED` | `"Mock document successfully verified against simulated issuer registry"` |
+| `TEST_MISMATCH` | `MISMATCH` | `"Mock document attributes do not match student records (mismatch simulated)"` |
+| `TEST_FAILED` | `FAILED` | `"Mock document verification failed (simulated issuer failure)"` |
+| *Any other `document_type`* | `FAILED` | `"Mock adapter has no configured verification rule for this document type"` |
+
+---
+
+### Execution Endpoint: `POST /api/v1/verifications/{verification_id}/execute`
+
+#### Request Payload
+- None (HTTP `POST` with empty body).
+
+#### Business Logic & State Transitions
+1. Lookup `verification_id` in `verification_records`. If not found -> reject with `HTTP 404 Not Found` (`{"detail": "Verification record not found"}`).
+2. **Pending State Check:** Verify `verification.status == "PENDING"`. If status is already `VERIFIED`, `MISMATCH`, or `FAILED` -> reject with `HTTP 409 Conflict` (`{"detail": "Verification record is not pending"}`).
+3. Load the associated `document_id` from `documents`. If missing -> reject with `HTTP 404 Not Found` (`{"detail": "Document not found"}`).
+4. Invoke `MockVerificationAdapter.verify_document(document)`.
+5. Update `verification_records.status` to the adapter's resulting status (`VERIFIED`, `MISMATCH`, or `FAILED`).
+6. Return `VerificationExecutionResponse`.
+
+#### Allowed Transitions
+- `PENDING -> VERIFIED`
+- `PENDING -> MISMATCH`
+- `PENDING -> FAILED`
+
+*Forbidden:*
+- `VERIFIED -> *`
+- `MISMATCH -> *`
+- `FAILED -> *`
+- `PENDING -> MANUAL_REVIEW` (Manual Review queue belongs to the next module)
+
+#### Success Response (`HTTP 200 OK`)
+```json
+{
+  "id": "<verification-id>",
+  "application_id": "<application-id>",
+  "document_id": "<document-id>",
+  "status": "VERIFIED|MISMATCH|FAILED",
+  "message": "<mock explanation>",
+  "evaluation_mode": "MOCK"
+}
+```
+
+#### Error Responses
+- **Verification record missing:** `HTTP 404 Not Found` (`{"detail": "Verification record not found"}`)
+- **Verification record not pending:** `HTTP 409 Conflict` (`{"detail": "Verification record is not pending"}`)
+- **Associated document missing:** `HTTP 404 Not Found` (`{"detail": "Document not found"}`)
+
