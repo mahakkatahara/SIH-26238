@@ -23,3 +23,12 @@ def get_student_by_user_id(db: Session, user_id: str):
 
 def get_student_by_id(db: Session, student_id: str):
     return db.query(Student).filter(Student.id == student_id).first()
+
+
+def update_student(db: Session, student: Student, update_data: dict) -> Student:
+    for field, value in update_data.items():
+        if hasattr(student, field):
+            setattr(student, field, value)
+    db.commit()
+    db.refresh(student)
+    return student
