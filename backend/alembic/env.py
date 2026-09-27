@@ -28,6 +28,7 @@ from app.models.user import User
 from app.models.verification_record import VerificationRecord
 from app.models.manual_review import ManualReview
 from app.models.application_status_history import ApplicationStatusHistory
+from app.models.payment import Payment
 
 target_metadata = Base.metadata
 
