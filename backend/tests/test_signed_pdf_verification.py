@@ -27,7 +27,8 @@ from app.models.scholarship import Scholarship
 from app.models.student import Student
 from app.models.user import User
 from app.models.verification_record import VerificationRecord
-from app.services.verification_service import execute_verification
+from app.repositories.manual_review_repository import get_manual_review_by_verification_id
+from app.services.verification_service import create_verification_record, execute_verification
 
 client = TestClient(app)
 
@@ -351,7 +352,142 @@ def test_real_marksheet_sample_if_present():
         source="PDF_UPLOAD",
     )
     result = SignedPdfVerificationAdapter.verify_document(doc)
+
+    print("\n--- Real Marksheet Full Certificate Chain ---")
+    chain = result.get("certificate_chain", [])
+    for i, link in enumerate(chain):
+        print(f"[{i}] Subject: {link['subject']}")
+        print(f"    Issuer : {link['issuer']}")
+    print(f"Status: {result['status']}")
+    print(f"Message: {result['message']}")
+    print("---------------------------------------------")
+
     assert result["evaluation_mode"] == "SIGNED_PDF"
+    assert result["status"] == "VERIFIED"
+    assert any("CCA India" in link["subject"] for link in chain)
+
+
+def test_real_marksheet_security_mismatch_and_manual_review(db_session):
+    """Security check for the real flow:
+    Upload real_marksheet.pdf for a student profile with a different name (Asha Meena)
+    through the upload API, link it to an application, create and execute verification.
+    It must return MISMATCH (not VERIFIED) and create a manual review.
+    Also ensures missing student name or unextractable document name results in MISMATCH/MANUAL_REVIEW.
+    """
+    sample_path = Path("tests/samples/real_marksheet.pdf")
+    if not sample_path.exists():
+        pytest.skip("backend/tests/samples/real_marksheet.pdf not found (skipped as instructed)")
+
+    # 1. Create student profile with a different name
+    user = User(name="Asha Meena", email=f"asha_{uuid.uuid4().hex[:6]}@example.com", password="pw")
+    db_session.add(user)
+    db_session.commit()
+    db_session.refresh(user)
+
+    student = Student(
+        name="Asha Meena",
+        email=user.email,
+        user_id=user.id,
+        date_of_birth=date(2004, 8, 15),
+        annual_family_income=240000,
+    )
+    db_session.add(student)
+    db_session.commit()
+    db_session.refresh(student)
+
+    # 2. Upload real_marksheet.pdf for that student through upload API
+    with open(sample_path, "rb") as f:
+        file_bytes = f.read()
+
+    upload_res = client.post(
+        f"/api/v1/students/{student.id}/documents/upload",
+        files={"file": ("real_marksheet.pdf", file_bytes, "application/pdf")},
+        data={"document_type": "CLASS_12_MARKSHEET"},
+    )
+    assert upload_res.status_code == 200
+    doc_data = upload_res.json()
+    doc_id = doc_data["id"]
+
+    # 3. Link document to application
+    scholarship = db_session.query(Scholarship).first()
+    app_rec = Application(student_id=student.id, scholarship_id=scholarship.id, status="DRAFT")
+    db_session.add(app_rec)
+    db_session.commit()
+    db_session.refresh(app_rec)
+
+    link = ApplicationDocument(application_id=app_rec.id, document_id=doc_id)
+    db_session.add(link)
+    db_session.commit()
+
+    # 4. Create and execute verification
+    ver_rec = create_verification_record(db_session, app_rec.id, doc_id)
+    assert isinstance(ver_rec, VerificationRecord)
+
+    exec_res = execute_verification(db_session, ver_rec.id)
+    assert exec_res["status"] == "MISMATCH"
+    assert exec_res["status"] != "VERIFIED"
+    assert exec_res["evaluation_mode"] == "SIGNED_PDF"
+
+    # 5. Verify database state & manual review creation
+    db_session.refresh(ver_rec)
+    assert ver_rec.status == "MISMATCH"
+
+    review = get_manual_review_by_verification_id(db_session, ver_rec.id)
+    assert review is not None
+    assert review.status == "OPEN"
+    assert review.application_id == app_rec.id
+    assert review.verification_id == ver_rec.id
+
+    # 6. Verify security safeguard: student profile with no name -> MISMATCH, never VERIFIED
+    user_no_name = User(name="No Name", email=f"u_{uuid.uuid4().hex[:6]}@example.com", password="pw")
+    db_session.add(user_no_name)
+    db_session.commit()
+    db_session.refresh(user_no_name)
+
+    student_no_name = Student(
+        name="",
+        email=user_no_name.email,
+        user_id=user_no_name.id,
+    )
+    db_session.add(student_no_name)
+    db_session.commit()
+    db_session.refresh(student_no_name)
+
+    app_no_name = Application(student_id=student_no_name.id, scholarship_id=scholarship.id, status="DRAFT")
+    db_session.add(app_no_name)
+    db_session.commit()
+    db_session.refresh(app_no_name)
+
+    link_no_name = ApplicationDocument(application_id=app_no_name.id, document_id=doc_id)
+    db_session.add(link_no_name)
+    db_session.commit()
+
+    ver_no_name = create_verification_record(db_session, app_no_name.id, doc_id)
+    exec_no_name = execute_verification(db_session, ver_no_name.id)
+    assert exec_no_name["status"] == "MISMATCH"
+    assert exec_no_name["status"] != "VERIFIED"
+
+    review_no_name = get_manual_review_by_verification_id(db_session, ver_no_name.id)
+    assert review_no_name is not None
+    assert review_no_name.status == "OPEN"
+
+    # Also test adapter directly with name=None
+    doc_obj = db_session.query(Document).filter(Document.id == doc_id).first()
+    res_direct_none = SignedPdfVerificationAdapter.verify_document(doc_obj, student=Student(name=None))
+    assert res_direct_none["status"] == "MISMATCH"
+    assert res_direct_none["status"] != "VERIFIED"
+
+    # 7. Verify security safeguard: unextractable candidate name -> MISMATCH, never VERIFIED
+    doc_obj = db_session.query(Document).filter(Document.id == doc_id).first()
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            "app.integrations.verification.signed_pdf_adapter.extract_certificate_data",
+            lambda path: {"name": None, "date_of_birth": None, "annual_family_income": None, "text": ""},
+        )
+        res_unextractable = SignedPdfVerificationAdapter.verify_document(doc_obj, student=student)
+        assert res_unextractable["status"] == "MISMATCH"
+        assert res_unextractable["status"] != "VERIFIED"
+        assert "extracted from certificate" in res_unextractable["message"].lower()
 
 
 # -------------------------------------------------------------

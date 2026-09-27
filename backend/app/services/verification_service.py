@@ -73,7 +73,14 @@ def execute_verification(db: Session, verification_id: str):
     if doc_source == "PDF_UPLOAD":
         application = get_application_by_id(db, verification.application_id)
         student = get_student_by_id(db, application.student_id) if application else None
-        result = SignedPdfVerificationAdapter.verify_document(document, student=student)
+        if not student or not getattr(student, "name", None) or not str(student.name).strip():
+            result = {
+                "status": "MISMATCH",
+                "message": "Student profile has no name or student record is missing",
+                "evaluation_mode": "SIGNED_PDF",
+            }
+        else:
+            result = SignedPdfVerificationAdapter.verify_document(document, student=student)
     else:
         result = MockVerificationAdapter.verify_document(document)
 

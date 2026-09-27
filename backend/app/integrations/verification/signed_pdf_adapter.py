@@ -12,8 +12,9 @@ from rapidfuzz import fuzz
 
 EVALUATION_MODE = "SIGNED_PDF"
 
-# Certificates directory for Indian CCA Root Certificates
+# Certificates directories for Indian CCA Root Certificates and Intermediate CAs
 TRUST_ROOTS_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "trust_roots"
+INTERMEDIATES_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "intermediates"
 
 
 def format_inr(number: int) -> str:
@@ -53,45 +54,67 @@ def get_trusted_signers() -> list[str]:
     return [s.strip().lower() for s in env_signers.split(",") if s.strip()]
 
 
-def load_cca_validation_context(extra_trust_roots: list | None = None) -> ValidationContext | None:
-    """Load Indian CCA root certificates from TRUST_ROOTS_DIR."""
+def _load_certs_from_directory(directory: Path) -> list:
+    """Load x509 certificates (DER or PEM) from a given directory."""
     import base64
     from asn1crypto import x509 as asn1_x509
 
-    trust_roots = []
+    certs = []
+    if not directory.exists():
+        return certs
+    for cert_file in sorted(directory.glob("*")):
+        if cert_file.suffix.lower() not in [".cer", ".crt", ".pem"]:
+            continue
+        try:
+            with open(cert_file, "rb") as f:
+                content = f.read().strip()
+            if b"-----BEGIN CERTIFICATE-----" in content:
+                for chunk in content.split(b"-----BEGIN CERTIFICATE-----")[1:]:
+                    b64_part = chunk.split(b"-----END CERTIFICATE-----")[0]
+                    clean_b64 = b"".join(b64_part.split())
+                    der = base64.b64decode(clean_b64)
+                    certs.append(asn1_x509.Certificate.load(der))
+            else:
+                try:
+                    certs.append(asn1_x509.Certificate.load(content))
+                except Exception:
+                    der = base64.b64decode(b"".join(content.split()))
+                    certs.append(asn1_x509.Certificate.load(der))
+        except Exception:
+            continue
+    return certs
+
+
+def load_cca_validation_context(
+    extra_trust_roots: list | None = None,
+    extra_intermediates: list | None = None,
+    moment: datetime | None = None,
+) -> ValidationContext | None:
+    """Load Indian CCA root certificates from TRUST_ROOTS_DIR and intermediates from INTERMEDIATES_DIR."""
     roots_dir = Path(os.getenv("TRUST_ROOTS_DIR", str(TRUST_ROOTS_DIR)))
-    if roots_dir.exists():
-        for cert_file in sorted(roots_dir.glob("*")):
-            if cert_file.suffix.lower() not in [".cer", ".crt", ".pem"]:
-                continue
-            try:
-                with open(cert_file, "rb") as f:
-                    content = f.read().strip()
-                if b"-----BEGIN CERTIFICATE-----" in content:
-                    for chunk in content.split(b"-----BEGIN CERTIFICATE-----")[1:]:
-                        b64_part = chunk.split(b"-----END CERTIFICATE-----")[0]
-                        clean_b64 = b"".join(b64_part.split())
-                        der = base64.b64decode(clean_b64)
-                        trust_roots.append(asn1_x509.Certificate.load(der))
-                else:
-                    try:
-                        trust_roots.append(asn1_x509.Certificate.load(content))
-                    except Exception:
-                        der = base64.b64decode(b"".join(content.split()))
-                        trust_roots.append(asn1_x509.Certificate.load(der))
-            except Exception:
-                continue
+    trust_roots = _load_certs_from_directory(roots_dir)
 
     if extra_trust_roots:
         trust_roots.extend(extra_trust_roots)
     if hasattr(SignedPdfVerificationAdapter, "extra_trust_roots") and SignedPdfVerificationAdapter.extra_trust_roots:
         trust_roots.extend(SignedPdfVerificationAdapter.extra_trust_roots)
 
+    inter_dir = Path(os.getenv("INTERMEDIATES_DIR", str(INTERMEDIATES_DIR)))
+    other_certs = _load_certs_from_directory(inter_dir)
+
+    if extra_intermediates:
+        other_certs.extend(extra_intermediates)
+    if hasattr(SignedPdfVerificationAdapter, "extra_intermediates") and SignedPdfVerificationAdapter.extra_intermediates:
+        other_certs.extend(SignedPdfVerificationAdapter.extra_intermediates)
+
     if trust_roots:
         return ValidationContext(
             trust_roots=trust_roots,
-            allow_fetching=False,
+            other_certs=other_certs if other_certs else None,
+            allow_fetching=True,
             revocation_mode="soft-fail",
+            moment=moment,
+            retroactive_revinfo=True,
         )
     return None
 
@@ -118,7 +141,7 @@ def extract_certificate_data(pdf_path: str) -> dict[str, Any]:
     # 1. Extract Name
     name_patterns = [
         r"(?:Candidate\s*Name|Student\s*Name|Name\s*of\s*(?:the\s*)?(?:Candidate|Student|Applicant)|Name)\s*[:\-]\s*([A-Za-z\.\'\t ]+)",
-        r"(?:This\s+is\s+to\s+certify\s+that|Certified\s+that)\s+(?:Shri|Smt|Kumari|Mr\.|Ms\.)?\s*([A-Za-z\.\'\t ]+?)(?:\s+(?:S/o|D/o|W/o|son\s+of|daughter\s+of|bearing|resident|has|is|,|\n))",
+        r"(?:This\s+is\s+to\s+certify\s+that|Certified\s+that)\s+(?:Shri|Smt|Kumari|Mr\.|Ms\.)?\s*([A-Za-z\.\'\t ]+?)(?:\s*(?:\n|\r|\Z)|(?:\s+(?:S/o|D/o|W/o|son\s+of|daughter\s+of|bearing|resident|has|is|,)))",
     ]
     for pattern in name_patterns:
         match = re.search(pattern, text, re.IGNORECASE)
@@ -202,7 +225,8 @@ class SignedPdfVerificationAdapter:
                     }
 
                 sig = embedded_sigs[0]
-                validation_context = load_cca_validation_context()
+                signing_time = getattr(sig, "self_reported_timestamp", None)
+                validation_context = load_cca_validation_context(moment=signing_time)
 
                 try:
                     val_status = validate_pdf_signature(
@@ -243,7 +267,16 @@ class SignedPdfVerificationAdapter:
                     except Exception:
                         signer_name = str(signing_cert.subject)
 
-                signing_time = val_status.signer_reported_dt or getattr(sig, "self_reported_timestamp", None)
+                signing_time = val_status.signer_reported_dt or signing_time
+
+                # Extract certificate chain
+                cert_chain = []
+                if hasattr(val_status, "validation_path") and val_status.validation_path:
+                    for c in val_status.validation_path:
+                        cert_chain.append({
+                            "subject": c.subject.human_friendly,
+                            "issuer": c.issuer.human_friendly,
+                        })
 
                 # Validate certificate chain trust against Indian CCA root certificates
                 if not getattr(val_status, "trusted", False):
@@ -253,6 +286,7 @@ class SignedPdfVerificationAdapter:
                         "evaluation_mode": EVALUATION_MODE,
                         "signer_name": signer_name,
                         "signing_time": str(signing_time) if signing_time else None,
+                        "certificate_chain": cert_chain,
                     }
 
                 # Validate against trusted signers
@@ -269,6 +303,7 @@ class SignedPdfVerificationAdapter:
                             "evaluation_mode": EVALUATION_MODE,
                             "signer_name": signer_name,
                             "signing_time": str(signing_time) if signing_time else None,
+                            "certificate_chain": cert_chain,
                         }
 
         except Exception as e:
@@ -283,13 +318,19 @@ class SignedPdfVerificationAdapter:
 
         # 3. Compare with student profile
         mismatch_reasons = []
-        if student:
-            # Fuzzy name matching
-            if extracted["name"] and student.name:
-                ratio = fuzz.token_sort_ratio(extracted["name"].lower().strip(), student.name.lower().strip())
+        if student is not None:
+            student_name = getattr(student, "name", None)
+            extracted_name = extracted.get("name")
+
+            if not student_name or not str(student_name).strip():
+                mismatch_reasons.append("Student profile does not contain a name")
+            elif not extracted_name or not str(extracted_name).strip():
+                mismatch_reasons.append("Candidate name could not be extracted from certificate")
+            else:
+                ratio = fuzz.token_sort_ratio(str(extracted_name).lower().strip(), str(student_name).lower().strip())
                 if ratio < 75.0:
                     mismatch_reasons.append(
-                        f"Name on certificate '{extracted['name']}' does not match profile '{student.name}'"
+                        f"Name on certificate '{extracted_name}' does not match profile '{student_name}'"
                     )
 
             # Date of Birth matching
@@ -317,6 +358,7 @@ class SignedPdfVerificationAdapter:
                 "signer_name": signer_name,
                 "signing_time": str(signing_time) if signing_time else None,
                 "extracted_data": extracted,
+                "certificate_chain": cert_chain,
             }
 
         return {
@@ -326,4 +368,5 @@ class SignedPdfVerificationAdapter:
             "signer_name": signer_name,
             "signing_time": str(signing_time) if signing_time else None,
             "extracted_data": extracted,
+            "certificate_chain": cert_chain,
         }

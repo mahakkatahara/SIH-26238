@@ -16,3 +16,5 @@ build/
 backend/tests/samples/
 backend/uploads/
 uploads/
+.DS_Store
+
