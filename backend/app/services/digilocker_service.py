@@ -45,6 +45,7 @@ def import_mock_digilocker_document(db: Session, student_id: str, document_type:
         student_id=student_id,
         document_type=matched_doc["document_type"],
         document_name=matched_doc["document_name"],
+        source="DIGILOCKER_MOCK",
         status="PENDING",
     )
     return create_document(db, new_doc)
