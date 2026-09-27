@@ -2,10 +2,20 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.core.dependencies import get_db
-from app.schemas.application import ApplicationCreate, ApplicationResponse
+from app.schemas.application import (
+    ApplicationCreate,
+    ApplicationResponse,
+    ApplicationStatusTransitionRequest,
+    ApplicationStatusHistoryResponse,
+)
 from app.schemas.application_document import ApplicationDocumentCreate, ApplicationDocumentResponse
 from app.schemas.document import DocumentResponse
-from app.services.application_service import create_application, list_applications
+from app.services.application_service import (
+    create_application,
+    list_applications,
+    transition_application_status,
+    get_application_timeline,
+)
 from app.services.application_document_service import (
     link_document_to_application,
     get_application_documents,
@@ -91,6 +101,53 @@ def list_application_documents_api(
         raise HTTPException(
             status_code=404,
             detail="Application not found"
+        )
+
+    return result
+
+
+@router.post("/{application_id}/status", response_model=ApplicationResponse)
+@router.post("/{application_id}/status/", response_model=ApplicationResponse, include_in_schema=False)
+def transition_application_status_api(
+    application_id: str,
+    payload: ApplicationStatusTransitionRequest,
+    db: Session = Depends(get_db),
+):
+    result = transition_application_status(db, application_id, payload.status)
+
+    if result == "APPLICATION_NOT_FOUND":
+        raise HTTPException(
+            status_code=404,
+            detail="Application not found",
+        )
+
+    if result == "INVALID_STATUS":
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid application status",
+        )
+
+    if result == "INVALID_TRANSITION":
+        raise HTTPException(
+            status_code=409,
+            detail="Invalid application status transition",
+        )
+
+    return result
+
+
+@router.get("/{application_id}/timeline", response_model=list[ApplicationStatusHistoryResponse])
+@router.get("/{application_id}/timeline/", response_model=list[ApplicationStatusHistoryResponse], include_in_schema=False)
+def get_application_timeline_api(
+    application_id: str,
+    db: Session = Depends(get_db),
+):
+    result = get_application_timeline(db, application_id)
+
+    if result == "APPLICATION_NOT_FOUND":
+        raise HTTPException(
+            status_code=404,
+            detail="Application not found",
         )
 
     return result

@@ -13,8 +13,8 @@ The following requirements are explicitly mandated by the **TribalSetu Team Deve
 - `POST /api/v1/applications`
 - `GET /api/v1/applications/{id}/timeline` *(Application tracker)*
 
-### Allowed Application Status Vocabulary
-Only the following uppercase status values are permitted:
+### Allowed Application Status Vocabulary (Playbook Section 16, Table 3)
+Only the following exact uppercase status values are permitted:
 ```text
 DRAFT, SUBMITTED, IN_VERIFICATION, DEFICIENCY, SANCTIONED, REJECTED, WITHDRAWN, COMPLETED
 ```
@@ -62,7 +62,7 @@ CREATE TABLE applications (
 - **`scholarship_id`**: `String`, `FOREIGN KEY -> scholarships.id`, `NOT NULL`
 - **`status`**: `String`, `NOT NULL` (values must be from the playbook status vocabulary).
 
-*Team Decision:* New applications created during Phase 1 will default to initial status **`DRAFT`**.
+*Team Decision:* New applications created default to initial status **`DRAFT`**.
 
 ---
 
@@ -77,9 +77,9 @@ CREATE TABLE applications (
 ```
 
 #### Behavior
-1. Validate that the referenced `student_id` exists in `students`. If not, reject with HTTP 404.
-2. Validate that the referenced `scholarship_id` exists in `scholarships`. If not, reject with HTTP 404.
-3. Construct the application with an internally generated UUID and default status `DRAFT`.
+1. Validate that `student_id` exists in `students`. If not -> `HTTP 404 Not Found`.
+2. Validate that `scholarship_id` exists in `scholarships`. If not -> `HTTP 404 Not Found`.
+3. Construct the application with generated UUID and default status `DRAFT`.
 4. Persist to PostgreSQL and return the created record.
 
 #### Success Response (`HTTP 200 OK`)
@@ -92,16 +92,9 @@ CREATE TABLE applications (
 }
 ```
 
-#### Error Responses
-- **Student not found:** `HTTP 404 Not Found` (`{"detail": "Student not found"}`)
-- **Scholarship not found:** `HTTP 404 Not Found` (`{"detail": "Scholarship not found"}`)
-
 ---
 
 ### GET Endpoint: `GET /api/v1/applications`
-
-#### Purpose
-Returns a list of all application records currently in the system.
 
 #### Success Response (`HTTP 200 OK`)
 ```json
@@ -114,21 +107,119 @@ Returns a list of all application records currently in the system.
   }
 ]
 ```
-- Direct JSON array of application objects (`list[ApplicationResponse]`).
-- No response envelope wrapper (consistent with Student and Scholarship endpoints).
-- *Team Decision:* Authenticated student-scoped filtering is deferred; Phase 1 returns the catalogue-style list.
 
 ---
 
-## 3. Phase-1 Deferred Features (Out of Scope for Current Step)
+## 3. Application Lifecycle — Team-Approved Phase-2
 
-The following features require subsequent team contracts and must **NOT** be implemented in Phase 1:
-- Separate timeline / status history table and endpoint (`GET /api/v1/applications/{id}/timeline`)
-- `application_documents` junction table and document upload/linking
-- Verification checks and adapter interfaces
-- Manual review workflows
-- Payment tracking
-- Notifications
-- Status transition endpoints (e.g. submit, sanction, reject, withdraw)
-- `application_number`
-- Timestamps (`created_at`, `updated_at`, `submitted_at`)
+### State Machine & Allowed Transitions
+
+```text
+DRAFT ───────────────> SUBMITTED ───────────────> IN_VERIFICATION
+  │                        │                            │   │
+  │ (withdraw)             │ (withdraw)                 │   │
+  ▼                        ▼                            │   │
+WITHDRAWN               WITHDRAWN                       │   │
+                                                        │   │
+                                                        ▼   ▼
+                           SANCTIONED <───────── DEFICIENCY (re-verify)
+                                │                      │
+                                │                      │ (withdraw)
+                                ▼                      ▼
+                            COMPLETED              WITHDRAWN
+
+IN_VERIFICATION ──────> REJECTED
+```
+
+#### Allowed Transition Map:
+- **`DRAFT`** -> `SUBMITTED`, `WITHDRAWN`
+- **`SUBMITTED`** -> `IN_VERIFICATION`, `WITHDRAWN`
+- **`IN_VERIFICATION`** -> `DEFICIENCY`, `SANCTIONED`, `REJECTED`
+- **`DEFICIENCY`** -> `IN_VERIFICATION`, `WITHDRAWN`
+- **`SANCTIONED`** -> `COMPLETED`
+- **Terminal States:** `REJECTED`, `WITHDRAWN`, `COMPLETED` (No transitions permitted from these states).
+- **Same-state transitions:** Prohibited (e.g. `SUBMITTED` -> `SUBMITTED` is rejected with `HTTP 409`).
+
+---
+
+### Automation Boundary
+- Application lifecycle transitions in Phase-2 are controlled through the status transition API.
+- Cross-module automatic status transitions (e.g. verification outcomes automatically causing `DEFICIENCY` or `SANCTIONED`, or payment triggers) are **NOT** coupled in this phase.
+
+---
+
+### Database Table: `application_status_history`
+
+```sql
+CREATE TABLE application_status_history (
+    id VARCHAR PRIMARY KEY,
+    application_id VARCHAR NOT NULL REFERENCES applications(id),
+    from_status VARCHAR NOT NULL,
+    to_status VARCHAR NOT NULL
+);
+```
+
+#### Fields ONLY:
+- **`id`**: `String`, generated UUID, `PRIMARY KEY`, `NOT NULL`
+- **`application_id`**: `String`, `FOREIGN KEY -> applications.id`, `NOT NULL`
+- **`from_status`**: `String`, `NOT NULL`
+- **`to_status`**: `String`, `NOT NULL`
+
+#### History Rule:
+- No history row is created for the initial `DRAFT` creation.
+- History begins on the first actual transition (e.g. `DRAFT -> SUBMITTED`).
+- Failed transition attempts do NOT create history rows.
+- Atomic transaction: `Application.status` update and `application_status_history` insertion commit together.
+
+---
+
+### Endpoints
+
+#### 1. Transition Application Status: `POST /api/v1/applications/{application_id}/status`
+
+##### Request Payload
+```json
+{
+  "status": "SUBMITTED"
+}
+```
+
+##### Validation Order:
+1. **Application Existence:** Check if `application_id` exists in `applications`. If missing -> `HTTP 404 Not Found` (`{"detail": "Application not found"}`).
+2. **Vocabulary Check:** Check if requested `status` belongs to the official Playbook vocabulary (`DRAFT`, `SUBMITTED`, `IN_VERIFICATION`, `DEFICIENCY`, `SANCTIONED`, `REJECTED`, `WITHDRAWN`, `COMPLETED`). If not -> `HTTP 400 Bad Request` (`{"detail": "Invalid application status"}`).
+3. **Transition Validation:** Check if transition from `application.status` to `status` is permitted by the state machine. If not -> `HTTP 409 Conflict` (`{"detail": "Invalid application status transition"}`).
+4. **Atomic Update:**
+   - Update `application.status = status`.
+   - Insert row into `application_status_history` (`from_status=old_status`, `to_status=new_status`).
+   - Single commit.
+
+##### Success Response (`HTTP 200 OK`):
+```json
+{
+  "id": "<application-uuid>",
+  "student_id": "<student-uuid>",
+  "scholarship_id": "<scholarship-uuid>",
+  "status": "SUBMITTED"
+}
+```
+
+---
+
+#### 2. Get Application Timeline: `GET /api/v1/applications/{application_id}/timeline`
+
+##### Behavior:
+1. Check if `application_id` exists. If missing -> `HTTP 404 Not Found` (`{"detail": "Application not found"}`).
+2. Query `application_status_history` for `application_id`.
+3. If no transitions have occurred, return `HTTP 200 OK` with `[]`.
+
+##### Success Response (`HTTP 200 OK`):
+```json
+[
+  {
+    "id": "<history-uuid>",
+    "application_id": "<application-uuid>",
+    "from_status": "DRAFT",
+    "to_status": "SUBMITTED"
+  }
+]
+```
