@@ -13,3 +13,7 @@ def create_application(db: Session, application: Application):
 
 def get_applications(db: Session):
     return db.query(Application).all()
+
+
+def get_application_by_id(db: Session, application_id: str):
+    return db.query(Application).filter(Application.id == application_id).first()
