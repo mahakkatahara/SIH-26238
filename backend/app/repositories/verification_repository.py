@@ -41,8 +41,9 @@ def get_verification_by_id(db: Session, verification_id: str):
     )
 
 
-def update_verification_status(db: Session, verification: VerificationRecord, status: str):
+def update_verification_status(db: Session, verification: VerificationRecord, status: str, commit: bool = True):
     verification.status = status
-    db.commit()
-    db.refresh(verification)
+    if commit:
+        db.commit()
+        db.refresh(verification)
     return verification
