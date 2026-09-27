@@ -198,3 +198,41 @@ The mock adapter executes purely deterministic demo rules without random generat
 - **Verification record not pending:** `HTTP 409 Conflict` (`{"detail": "Verification record is not pending"}`)
 - **Associated document missing:** `HTTP 404 Not Found` (`{"detail": "Document not found"}`)
 
+---
+
+## 4. Real Digitally Signed PDF Verification Contract (`evaluation_mode = SIGNED_PDF`)
+
+### Architecture & Boundaries
+For documents acquired via PDF upload (`source = "PDF_UPLOAD"`), verification is executed locally using **pyHanko** (cryptographic digital signature verification) and **pdfplumber** (text & metadata extraction), eliminating fake APIs or third-party network vulnerabilities.
+
+### Upload Endpoint: `POST /api/v1/students/{student_id}/documents/upload`
+- **Request:** `multipart/form-data` with:
+  - `file`: PDF file (`max 5 MB`)
+  - `document_type`: `ST_CERTIFICATE | INCOME_CERTIFICATE | CLASS_12_MARKSHEET | DOMICILE_CERTIFICATE`
+- **Storage:** Persisted locally to `backend/uploads/` (gitignored).
+- **Database:** Creates `Document` row with:
+  - `file_path`: Absolute path on disk
+  - `source`: `"PDF_UPLOAD"`
+  - `status`: `"PENDING"`
+
+### Verification Flow & Evaluation Rules
+1. **Digital Signature & Trust Root Verification (`pyHanko`):**
+   - Embedded digital signature is extracted. If missing -> `FAILED` (`"Digital signature missing from PDF"`).
+   - Byte-range integrity is validated (`val_status.intact`). If tampered or modified after signing -> `FAILED` (`"Digital signature is invalid or document has been modified after signing"`).
+   - Certificate chain is cryptographically validated against official Indian CCA root certificates (`backend/app/data/trust_roots/`) using pyHanko `ValidationContext`. If self-signed or not issued by an authorized Indian Root CA -> `FAILED` (`"Certificate not issued by a trusted Indian CA"`).
+   - Only after certificate chain trust is established, signer name is checked against `TRUSTED_SIGNERS` in `.env`.
+2. **Text Extraction & Student Profile Matching (`pdfplumber` + `rapidfuzz`):**
+   - Candidate Name, Date of Birth, and Income (for `INCOME_CERTIFICATE`) are extracted from certificate text.
+   - Name is compared with the student's registered profile using fuzzy token sort matching (`rapidfuzz`). If similarity is below threshold -> `MISMATCH` (`"Name on certificate '<extracted>' does not match profile '<profile>'"`).
+   - Date of Birth and Income (for income certificates) are validated against profile attributes. If different -> `MISMATCH`.
+3. **Execution Outcomes & State Transitions:**
+   - **`FAILED`:** Signature missing, signature invalid, PDF modified after signing, untrusted CA root, or signer not in trusted list.
+   - **`MISMATCH`:** Cryptographic signature valid and trusted, but extracted certificate data does not match the student's profile. Automatically enqueued to `manual_reviews` exception queue for officer review.
+   - **`VERIFIED`:** Signature intact, certificate chain valid to Indian CCA root, signer trusted, and certificate metadata matches student profile.
+   - **Evaluation Mode:** Always returns `evaluation_mode = "SIGNED_PDF"`.
+
+### Adapter Routing Rules
+- Only documents with `source = "PDF_UPLOAD"` route to `SignedPdfVerificationAdapter`.
+- All other documents (`source = "MOCK"`, `source = "DIGILOCKER_MOCK"`, or `source = None`) route to `MockVerificationAdapter` (`evaluation_mode = "MOCK"`).
+- `documents.source` defaults to `NULL`, with mock imports setting `source = "DIGILOCKER_MOCK"`. Existing legacy documents are backfilled to `source = "MOCK"` where `file_path` is null.
+

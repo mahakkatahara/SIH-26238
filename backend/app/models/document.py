@@ -1,6 +1,6 @@
-from sqlalchemy import Column, String, ForeignKey
-from app.core.database import Base
 import uuid
+from sqlalchemy import Column, ForeignKey, String
+from app.core.database import Base
 
 
 class Document(Base):
@@ -10,4 +10,6 @@ class Document(Base):
     student_id = Column(String, ForeignKey("students.id"), nullable=False)
     document_type = Column(String, nullable=False)
     document_name = Column(String, nullable=False)
+    file_path = Column(String, nullable=True)
+    source = Column(String, nullable=True, default=None)
     status = Column(String, nullable=False, default="PENDING")
